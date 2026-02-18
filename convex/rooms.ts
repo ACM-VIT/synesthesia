@@ -3,6 +3,9 @@ import type { MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 
+// Maximum number of played songs to retain per room
+const MAX_PLAYED_SONGS_PER_ROOM = 100;
+
 function generateRoomCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -17,7 +20,11 @@ async function isCodeAvailable(ctx: MutationCtx, code: string) {
 }
 
 /** Throws if the calling user is not the room host. */
-async function requireAdmin(ctx: MutationCtx, roomId: Id<"rooms">, userId: string) {
+async function requireAdmin(
+  ctx: MutationCtx,
+  roomId: Id<"rooms">,
+  userId: string,
+) {
   const room = await ctx.db.get(roomId);
   if (!room) {
     throw new Error("Room not found.");
@@ -187,6 +194,32 @@ export const advanceSong = mutation({
     if (room.currentSongId) {
       const finishedSong = await ctx.db.get(room.currentSongId);
       if (finishedSong) {
+        // Save to played songs history before deleting
+        await ctx.db.insert("playedSongs", {
+          roomId: finishedSong.roomId,
+          provider: finishedSong.provider,
+          providerId: finishedSong.providerId,
+          title: finishedSong.title,
+          artist: finishedSong.artist,
+          albumArtUrl: finishedSong.albumArtUrl,
+          addedBy: finishedSong.addedBy,
+          addedByName: finishedSong.addedByName,
+          playedAt: Date.now(),
+        });
+
+        // Cleanup: remove old played songs beyond the retention limit
+        const playedSongs = await ctx.db
+          .query("playedSongs")
+          .withIndex("by_room_played", (q) => q.eq("roomId", args.roomId))
+          .order("desc")
+          .collect();
+        if (playedSongs.length > MAX_PLAYED_SONGS_PER_ROOM) {
+          const toDelete = playedSongs.slice(MAX_PLAYED_SONGS_PER_ROOM);
+          for (const old of toDelete) {
+            await ctx.db.delete(old._id);
+          }
+        }
+
         // Delete votes for the finished song
         const votes = await ctx.db
           .query("votes")
